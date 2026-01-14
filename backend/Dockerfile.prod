@@ -1,0 +1,55 @@
+# ============================================
+# Multi-Stage Build for Spring Boot Backend
+# ============================================
+# Used by:
+#   - docker-compose.prod.yml: builds image on-the-fly from this file
+#   - Kubernetes: uses pre-built image (built from this file, pushed to registry)
+#
+# Benefits of Multi-Stage Build:
+# 1. Smaller final image: Build tools (Maven) not included in production image
+# 2. Layer caching: Dependencies cached separately from source code
+# 3. Security: No build tools or source code in production image
+
+# ============================================
+# STAGE 1: Build the application
+# ============================================
+# Use Maven image with Java 17 for building
+FROM maven:3.9.9-eclipse-temurin-17 AS build
+WORKDIR /workspace
+
+# Copy pom.xml first for dependency caching
+# Docker caches this layer - only rebuilds if pom.xml changes
+COPY pom.xml ./
+
+# Copy source code
+COPY src ./src
+
+# Build the JAR file
+# -B: Batch mode (non-interactive)
+# -DskipTests: Skip tests for faster builds (run tests in CI/CD pipeline)
+RUN mvn -B -DskipTests package
+
+# ============================================
+# STAGE 2: Create production image
+# ============================================
+# Use JRE (not JDK) for smaller image and better security
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+
+# Install curl for health checks (needs root privileges)
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN groupadd -r spring && useradd -r -g spring spring
+USER spring:spring
+
+# Copy only the JAR file from build stage (not source code or Maven)
+COPY --from=build /workspace/target/yugioh-backend-0.0.1-SNAPSHOT.jar /app/app.jar
+
+# Run the Spring Boot application with JVM optimizations
+ENTRYPOINT ["java", \
+    "-XX:+UseContainerSupport", \
+    "-XX:MaxRAMPercentage=75.0", \
+    "-Djava.security.egd=file:/dev/./urandom", \
+    "-jar", \
+    "/app/app.jar"]

@@ -1,0 +1,24 @@
+# ============================================
+# Development Dockerfile for Spring Boot Backend
+# ============================================
+# Features:
+#   - Spring Boot DevTools for hot reload
+#   - Remote debugging on port 5005
+#   - Verbose logging
+#   - Source code mounted for changes
+
+FROM maven:3.9.9-eclipse-temurin-17
+WORKDIR /app
+
+# Copy pom.xml for dependency caching
+COPY pom.xml ./
+RUN mvn dependency:go-offline
+
+# Copy source code
+COPY src ./src
+
+# Expose ports
+EXPOSE 8080 5005
+
+# Use spring-boot:run for DevTools support  
+CMD ["mvn", "spring-boot:run"]

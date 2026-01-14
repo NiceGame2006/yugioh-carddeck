@@ -1,0 +1,30 @@
+# Java / Maven
+/target/
+/backend/target/
+*.class
+*.jar
+
+# Gradle
+.gradle/
+
+# Node / frontend
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+node_modules/
+dist/
+.vite/
+
+# Misc
+.DS_Store
+.env
+.env.local
+.idea/
+.vscode/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+Thumbs.db
+ehthumbs.db

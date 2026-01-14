@@ -1,0 +1,57 @@
+# ============================================
+# Multi-Stage Build for React Frontend
+# ============================================
+# Used by:
+#   - docker-compose.prod.yml: builds image on-the-fly from this file
+#   - Kubernetes: uses pre-built image (built from this file, pushed to registry)
+#
+# Benefits of Multi-Stage Build:
+# 1. Tiny final image: ~25MB (nginx + static files) vs ~1GB (Node.js + dependencies)
+# 2. Fast serving: nginx is optimized for static file serving
+# 3. Security: No Node.js runtime or source code in production
+
+# ============================================
+# STAGE 1: Build React application
+# ============================================
+# Use Node.js 22 on Alpine Linux (small base image ~40MB)
+FROM node:22-alpine AS build
+WORKDIR /app
+
+# Copy package files first for dependency caching
+# Docker caches this layer - only rebuilds if package files change
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+# npm ci: Clean install from package-lock.json (faster, reproducible)
+# npm install: Fallback if package-lock.json doesn't exist
+# --silent: Reduce log noise
+RUN if [ -f package-lock.json ]; then npm ci --silent; else npm install --silent; fi
+
+# Copy source code
+COPY . .
+
+# Build production bundle with Vite
+# Output: /app/dist folder with optimized static files
+RUN npm run build
+
+# ============================================
+# STAGE 2: Serve with nginx
+# ============================================
+# Use nginx on Alpine Linux (tiny ~10MB image)
+FROM nginx:alpine
+
+# Copy built static files from build stage
+COPY --from=build /app/dist /usr/share/nginx/html
+
+# Copy custom nginx configuration
+# - Proxies /api/* to backend service
+# - Supports client-side routing (React Router)
+# - Enables gzip compression
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Expose port 80 for HTTP traffic
+EXPOSE 80
+
+# Run nginx in foreground (required for Docker)
+# daemon off: Keep nginx in foreground so container doesn't exit
+CMD ["nginx", "-g", "daemon off;"]

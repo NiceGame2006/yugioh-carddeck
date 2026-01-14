@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yugioh-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: yugioh-backend
+  template:
+    metadata:
+      labels:
+        app: yugioh-backend
+    spec:
+      containers:
+      - name: yugioh-backend
+        image: yugioh-backend:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        startupProbe:
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8080
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8080
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          timeoutSeconds: 5
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "default"
+        - name: SPRING_DATASOURCE_URL
+          value: "jdbc:postgresql://postgres:5432/yugioh"
+        - name: SPRING_DATASOURCE_USERNAME
+          value: "yugioh"
+        - name: SPRING_DATASOURCE_PASSWORD
+          value: "password"
+        - name: SPRING_DATA_REDIS_HOST
+          value: "redis"
+        - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka:9092"

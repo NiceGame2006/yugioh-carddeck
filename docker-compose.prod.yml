@@ -1,0 +1,143 @@
+# ============================================
+# Production Configuration
+# ============================================
+# Usage: docker-compose -f docker-compose.prod.yml up -d
+# Or: make prod-up
+
+services:
+  postgres:
+    image: postgres:13
+    env_file:
+      - .env.prod
+    environment:
+      POSTGRES_DB: yugioh
+      POSTGRES_USER: yugioh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_IN_PRODUCTION}
+    # No port exposure (only accessible within Docker network)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yugioh -d yugioh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+
+  redis:
+    image: redis:7-alpine
+    env_file:
+      - .env.prod
+    # No port exposure (no password for local prod testing)
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    env_file:
+      - .env.prod
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w 3 localhost 2181 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    env_file:
+      - .env.prod
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    # No external port exposure
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: always
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod  # Production Dockerfile (multi-stage, JRE, optimized)
+    env_file:
+      - .env.prod
+    ports:
+      - "8080:8080"  # API only, no debug port
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1  # Can scale up: docker-compose up --scale backend=3
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 768M
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod  # Production Dockerfile (Vite build + Nginx)
+    ports:
+      - "3000:80"  # Nginx serves on port 80
+    depends_on:
+      - backend
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+volumes:
+  postgres_data:

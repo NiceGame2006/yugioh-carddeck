@@ -1,0 +1,201 @@
+# ============================================
+# Docker Compose Development Configuration
+# ============================================
+# Environment: DEVELOPMENT
+# Services: postgres, redis, zookeeper, kafka, backend, frontend
+# Architecture: Microservices with message queue (Kafka) and caching (Redis)
+#
+# Usage:
+#   Development:
+#     docker-compose -f docker-compose.dev.yml up -d                    # Direct command
+#     make dev-up                                                       # Or use Makefile
+#
+#   Production:
+#     docker-compose -f docker-compose.prod.yml up -d
+#     make prod-up                                                      # Or use Makefile
+#
+#   Switch environments:
+#     make dev-down && make prod-up                                     # Dev to Prod
+#     make prod-down && make dev-up                                     # Prod to Dev
+#
+# Dev Features (this file):
+#   - All ports exposed for debugging
+#   - SQL logging enabled
+#   - Hot reload enabled for frontend
+#   - Remote debugging port 5005
+
+
+services:
+  # ============================================
+  # PostgreSQL Database
+  # ============================================
+  # Stores: Users, Cards, Decks, Archetypes
+  # Port: 5432 (exposed for local DB tools like DBeaver, pgAdmin)
+  postgres:
+    image: postgres:13
+    env_file:
+      - .env.dev
+    environment:
+      POSTGRES_DB: yugioh          # Database name
+      POSTGRES_USER: yugioh        # Username for connection
+      POSTGRES_PASSWORD: password  # Dev password (OK for local use)
+    ports:
+      - "5432:5432"  # Host:Container - Access from localhost:5432
+    volumes:
+      # Persist database data across container restarts
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Check if database is ready to accept connections
+      # Backend waits for this before starting
+      test: ["CMD-SHELL", "pg_isready -U yugioh -d yugioh"]
+      interval: 10s   # Check every 10 seconds
+      timeout: 5s     # Fail if check takes > 5 seconds
+      retries: 5      # Try 5 times before marking unhealthy
+    restart: unless-stopped  # Auto-restart if crashes (but not if manually stopped)
+
+  # ============================================
+  # Redis (In-Memory Cache & Lock Manager)
+  # ============================================
+  # Used for:
+  #   1. Caching card data (14K+ cards, 60min TTL)
+  #   2. Distributed locking (prevent race conditions)
+  #   3. Rate limiting (token bucket algorithm)
+  #   4. Message queues (background job processing)
+  # Port: 6379 (exposed for redis-cli debugging)
+  redis:
+    image: redis:7-alpine  # Alpine = smaller image (~10MB)
+    env_file:
+      - .env.dev
+    ports:
+      - "6379:6379"
+    healthcheck:
+      # Simple ping check to verify Redis is responding
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # Zookeeper (Kafka Cluster Coordinator)
+  # ============================================
+  # Purpose: Manages Kafka broker metadata, leader election, configuration
+  # Note: Modern Kafka (KRaft mode) doesn't need Zookeeper, but industry still uses it
+  # Used by: Kafka service only (not directly by backend)
+  # Port: 2181 (internal only, not exposed to host)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0  # Confluent Platform Zookeeper
+    env_file:
+      - .env.dev
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181  # Port for Kafka to connect
+      ZOOKEEPER_TICK_TIME: 2000    # Heartbeat interval in ms
+    healthcheck:
+      # Check if Zookeeper is responding ("ruok" = "are you ok?")
+      test: ["CMD-SHELL", "echo ruok | nc -w 3 localhost 2181 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # Kafka (Distributed Message Queue)
+  # ============================================
+  # Purpose: Cross-service messaging, durable event streaming
+  # Current Usage: Demo only (/api/cards/send-kafka endpoint)
+  # Potential Usage: Microservices communication, event sourcing, data pipelines
+  # Port: 9092 (exposed to host and Docker network)
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0  # Confluent Platform Kafka
+    env_file:
+      - .env.dev
+    depends_on:
+      zookeeper:
+        condition: service_healthy  # Wait for Zookeeper to be ready
+    ports:
+      - "9092:9092"   # Expose Kafka to host
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
+
+  # ============================================
+  # Backend (Spring Boot API)
+  # ============================================
+  # Technology: Java 17, Spring Boot 3.2.5, JWT Authentication
+  # API Endpoints: /api/cards, /api/decks, /api/archetypes, /api/auth
+  # Port: 8080 (REST API)
+  # Port: 5005 (Java Remote Debugging)
+  # Configuration: Uses application.properties (already has correct Docker hostnames)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev  # Development Dockerfile with hot reload
+    env_file:
+      - .env.dev
+    ports:
+      - "8080:8080"  # Expose API to localhost:8080
+      - "5005:5005"  # Java remote debugging
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - MAVEN_OPTS=-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005
+    volumes:
+      - ./backend/src:/app/src:ro  # Mount source for visibility (not hot reload in Java)
+    depends_on:
+      postgres:
+        condition: service_healthy  # Wait for database to be ready
+      redis:
+        condition: service_started  # Redis starts fast, no health check needed
+      kafka:
+        condition: service_started  # Don't wait for healthy, Kafka is optional
+    restart: unless-stopped
+    healthcheck:
+      # Spring Boot Actuator health endpoint (checks DB connection, card data, etc.)
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # Frontend (Vite Dev Server)
+  # ============================================
+  # Technology: React 18, Vite (development mode with hot reload)
+  # Port: 3000 (Vite dev server)
+  # Hot Module Replacement: Code changes reflect instantly
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile.dev  # Development Dockerfile with Vite dev server
+    ports:
+      - "3000:3000"  # Vite dev server with HMR
+    volumes:
+      - ./frontend/src:/app/src:ro  # Hot reload React source code
+      - ./frontend/public:/app/public:ro  # Hot reload public assets
+    depends_on:
+      - backend  # Wait for backend to start
+    restart: unless-stopped
+    command: npm run dev -- --host 0.0.0.0  # Vite dev server accessible from host
+    healthcheck:
+      # Check if Vite dev server is responding
+      test: ["CMD-SHELL", "curl -f http://localhost:3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ============================================
+# Named Volumes (Persistent Storage)
+# ============================================
+# postgres_data: Persists database across container restarts/recreates
+# Without this volume, all data would be lost when postgres container is removed
+volumes:
+  postgres_data:
